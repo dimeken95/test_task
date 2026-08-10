@@ -1,0 +1,35 @@
+# Optional: queue-depth autoscaling for the worker tier.
+#
+#   kubectl delete hpa payload-worker -n payload   # KEDA manages its own HPA
+#   kubectl apply -f deploy/k8s/06-keda-worker.yaml
+#
+# Requires KEDA (https://keda.sh) and a Prometheus reachable at the URL below.
+#
+# Why this and not CPU: workers are I/O bound — they wait on object storage and
+# on the external processor — so CPU barely moves while the backlog grows.
+# payload_jobs_pending is the signal that actually correlates with the work
+# that is waiting, and scaling to zero is safe because the queue is durable.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payload-worker
+  namespace: payload
+spec:
+  scaleTargetRef:
+    name: payload-worker
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: max(payload_jobs_pending)
+        # One replica per 20 queued jobs.
+        threshold: "20"

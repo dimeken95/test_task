@@ -1,0 +1,98 @@
+{
+  "title": "Payload Service",
+  "uid": "payload-service",
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Request rate by route",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (route, status) (rate(payload_http_requests_total[1m]))",
+          "legendFormat": "{{route}} {{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency (p50 / p95 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, route) (rate(payload_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{route}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(payload_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{route}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(payload_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{route}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth (autoscaling signal)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "max(payload_jobs_pending)", "legendFormat": "pending" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Job throughput",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(payload_jobs_claimed_total[1m]))", "legendFormat": "claimed/s" },
+        { "expr": "sum(rate(payload_jobs_retried_total[1m]))", "legendFormat": "retried/s" },
+        { "expr": "sum(rate(payload_jobs_reaped_total[1m]))", "legendFormat": "reaped/s" },
+        { "expr": "sum(rate(payload_processor_errors_total[1m]))", "legendFormat": "processor errors/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Job processing duration (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, status) (rate(payload_job_process_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest: upload slots and shed load",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "sum(payload_uploads_in_flight)", "legendFormat": "in flight" },
+        { "expr": "sum(rate(payload_uploads_rejected_total[1m]))", "legendFormat": "rejected/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Object storage throughput",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "sum(rate(payload_s3_upload_bytes_total[1m]))", "legendFormat": "bytes/s" },
+        { "expr": "sum(rate(payload_s3_multipart_parts_total[1m]))", "legendFormat": "parts/s" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upload duration by mode (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, mode) (rate(payload_s3_upload_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{mode}}"
+        }
+      ]
+    }
+  ]
+}

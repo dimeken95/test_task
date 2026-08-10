@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - bodyclose      # a leaked response body pins a connection until GC
+    - contextcheck   # catches the "finish work on a cancelled context" class of bug
+    - errorlint      # errors.Is/As instead of == and bare type assertions
+    - gosec
+    - misspell
+    - nilerr
+    - noctx          # every outbound request must carry a context
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - wastedassign
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable:
+        - shadow
+    gosec:
+      excludes:
+        - G404  # math/rand/v2 is used for retry jitter, never for secrets
+    revive:
+      rules:
+        - name: exported
+          disabled: true  # internal packages; comments sit on the non-obvious parts
+
+  exclusions:
+    rules:
+      # Tests assert on JSON maps and write to recorders; checking every
+      # assertion and Fprintf there adds noise without catching bugs, and a
+      # wrong assumption fails the test anyway. Production code stays strict.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - gosec
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

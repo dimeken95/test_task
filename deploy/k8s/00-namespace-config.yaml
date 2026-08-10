@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payload
+  labels:
+    app.kubernetes.io/name: payload-service
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payload-config
+  namespace: payload
+data:
+  HTTP_ADDR: ":8080"
+  S3_ENDPOINT: "http://minio:9000"
+  # Presigned URLs are consumed by the processor pod, so the in-cluster
+  # service name is correct here. Point this at the public endpoint if the
+  # processor ever runs outside the cluster.
+  S3_PRESIGN_ENDPOINT: "http://minio:9000"
+  S3_BUCKET: "payloads"
+  S3_USE_PATH_STYLE: "true"
+  S3_REGION: "us-east-1"
+  S3_PART_SIZE: "8388608"
+  S3_PART_CONCURRENCY: "4"
+  MOCK_PROCESSOR_URL: "http://mockprocessor:8090"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4318"
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
+  SERVICE_NAME: "payload-service"
+  MIGRATIONS_DIR: "/app/migrations"
+  LOG_LEVEL: "info"
+  WORKER_CONCURRENCY: "4"
+  WORKER_LEASE: "2m"
+  REAPER_INTERVAL: "15s"
+  MAX_ATTEMPTS: "5"
+  RETRY_BACKOFF_BASE: "5s"
+  RETRY_BACKOFF_MAX: "10m"
+  # Bounds resident memory on the api tier:
+  # 8 MiB * (1 + 2*4) * 16 ≈ 1.1 GiB worst case, which is why the api
+  # container asks for a 1.5Gi limit below.
+  MAX_CONCURRENT_UPLOADS: "16"
+  SHUTDOWN_TIMEOUT: "25s"
+  DRAIN_DELAY: "5s"
+---
+# Demo credentials only. In a real cluster these come from External Secrets,
+# Sealed Secrets or the cloud provider's secret store — never from git.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payload-secrets
+  namespace: payload
+type: Opaque
+stringData:
+  DATABASE_URL: "postgres://payload:payload@postgres:5432/payload?sslmode=disable"
+  S3_ACCESS_KEY: "minioadmin"
+  S3_SECRET_KEY: "minioadmin"

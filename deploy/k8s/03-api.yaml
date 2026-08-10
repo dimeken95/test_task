@@ -1,0 +1,161 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payload-api
+  namespace: payload
+  labels:
+    app: payload-api
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: payload-api
+  template:
+    metadata:
+      labels:
+        app: payload-api
+        app.kubernetes.io/component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Uploads can legitimately run for minutes; the grace period has to cover
+      # DRAIN_DELAY plus the longest in-flight request we intend to finish.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Keep replicas off the same node so a node failure cannot take the
+      # whole tier down.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: payload-api
+      containers:
+        - name: api
+          image: payload-service:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: APP_MODE
+              value: "api"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          envFrom:
+            - configMapRef:
+                name: payload-config
+            - secretRef:
+                name: payload-secrets
+          ports:
+            - containerPort: 8080
+              name: http
+          # startupProbe covers slow first boots (migrations, cold caches)
+          # without forcing a lax livenessProbe.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            # Sized against MAX_CONCURRENT_UPLOADS * S3_PART_SIZE * (1+2*parts):
+            # 16 * 8Mi * 9 ≈ 1.1Gi worst case.
+            limits:
+              cpu: "2"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payload-api
+  namespace: payload
+  labels:
+    app: payload-api
+spec:
+  selector:
+    app: payload-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payload-api
+  namespace: payload
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payload-api
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payload-api
+  namespace: payload
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payload-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # The ingest path is memory-bound as much as CPU-bound, so both matter.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      # Uploads are long-lived; scaling down eagerly would cut them off.
+      stabilizationWindowSeconds: 300

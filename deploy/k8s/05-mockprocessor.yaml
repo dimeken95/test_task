@@ -1,0 +1,80 @@
+# Stand-in for the external processing service. It is deployed separately from
+# the app precisely because it represents a third party: its own scaling,
+# its own failure modes, reached only over HTTP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockprocessor
+  namespace: payload
+  labels:
+    app: mockprocessor
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mockprocessor
+  template:
+    metadata:
+      labels:
+        app: mockprocessor
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mockprocessor
+          image: payload-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/mockprocessor"]
+          env:
+            - name: HTTP_ADDR
+              value: ":8090"
+            - name: SERVICE_NAME
+              value: "mock-processor"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "otel-collector:4318"
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+          ports:
+            - containerPort: 8090
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mockprocessor
+  namespace: payload
+spec:
+  selector:
+    app: mockprocessor
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

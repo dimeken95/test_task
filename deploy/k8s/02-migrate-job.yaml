@@ -1,0 +1,56 @@
+# Schema changes run once, before the app rolls out, instead of racing from
+# every replica. The application still takes a pg_advisory_lock on startup as
+# a second line of defence, but the ordering belongs here.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: payload-migrate
+  namespace: payload
+  annotations:
+    # Re-apply this Job on every release by bumping the name or deleting it;
+    # in a Helm/Argo setup this is a pre-install/pre-upgrade hook.
+    description: "Applies goose migrations before api/worker start"
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: payload-migrate
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: payload-service:latest
+          imagePullPolicy: IfNotPresent
+          # APP_MODE=api with no listener work: the process runs migrations at
+          # startup and the Job waits for a clean exit.
+          command: ["/app/server"]
+          env:
+            - name: APP_MODE
+              value: "api"
+            - name: MIGRATE_ONLY
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: payload-config
+            - secretRef:
+                name: payload-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

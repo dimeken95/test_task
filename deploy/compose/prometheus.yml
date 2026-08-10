@@ -1,0 +1,36 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # Compose assigns every replica its own IP behind the service name, so DNS
+  # discovery keeps scraping all of them after `--scale api=N`.
+  - job_name: payload-api
+    # Short refresh so `--scale api=N` shows up in seconds, not after the
+    # 30s default.
+    dns_sd_configs:
+      - names: ["api"]
+        type: A
+        port: 8080
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+      - target_label: tier
+        replacement: api
+
+  - job_name: payload-worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 8080
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+      - target_label: tier
+        replacement: worker
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

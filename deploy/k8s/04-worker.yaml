@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payload-worker
+  namespace: payload
+  labels:
+    app: payload-worker
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payload-worker
+  template:
+    metadata:
+      labels:
+        app: payload-worker
+        app.kubernetes.io/component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Must exceed the longest job so a rolling update lets in-flight work
+      # finish and record its result instead of waiting out the lease.
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: payload-worker
+      containers:
+        - name: worker
+          image: payload-service:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: APP_MODE
+              value: "worker"
+            - name: HTTP_ADDR
+              value: ":8080"
+            # Ownership stamped on every claimed row, so an incident points at
+            # a specific pod.
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          envFrom:
+            - configMapRef:
+                name: payload-config
+            - secretRef:
+                name: payload-secrets
+          ports:
+            - containerPort: 8080
+              name: http
+          # Workers take no ingress traffic, so readiness is not about routing;
+          # the health endpoint exists for ops and for metrics scraping.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+# Headless service so Prometheus can discover and scrape every worker pod;
+# nothing routes traffic to workers.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payload-worker
+  namespace: payload
+  labels:
+    app: payload-worker
+spec:
+  clusterIP: None
+  selector:
+    app: payload-worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payload-worker
+  namespace: payload
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payload-worker
+---
+# CPU is a poor proxy for how much work a queue consumer has: workers spend
+# their time waiting on S3 and the processor. This HPA is the portable
+# fallback; prefer the queue-depth ScaledObject in 06-keda-worker.yaml.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payload-worker
+  namespace: payload
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payload-worker
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

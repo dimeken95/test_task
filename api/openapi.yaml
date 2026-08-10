@@ -1,0 +1,373 @@
+openapi: 3.0.3
+info:
+  title: Payload Service API
+  version: "1.0.0"
+  description: |
+    Asynchronous ingestion of text and file payloads.
+
+    `POST /api/v1/jobs` accepts `multipart/form-data`, streams the file to
+    object storage and returns `202 Accepted` immediately. Processing happens
+    out of band; poll `GET /api/v1/jobs/{id}` for the outcome.
+
+    Declared content types are verified against the payload's magic bytes, so a
+    file whose bytes do not match its declared type is rejected with `415`.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local compose stack
+
+tags:
+  - name: jobs
+    description: Payload submission and status
+  - name: operations
+    description: Probes and build metadata
+
+# Applies to /api/v1 only. Probes and /metrics are unauthenticated because
+# kubelet and Prometheus scrape them and they expose no payload data.
+# Authentication is inactive when the service starts with no API_KEYS set.
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+
+paths:
+  /api/v1/jobs:
+    post:
+      tags: [jobs]
+      summary: Submit a payload for processing
+      description: |
+        At least one of `text` or `file` must be present. Field order does not
+        matter: a `text` field that follows the file part is still captured.
+
+        Size limits are enforced per media kind while streaming
+        (`MAX_TEXT_BYTES`, `MAX_DOC_BYTES`, `MAX_IMAGE_BYTES`,
+        `MAX_VIDEO_BYTES`).
+
+        Send `Idempotency-Key` to make retries safe: a repeated submission
+        returns the original job with `Idempotency-Replayed: true` instead of
+        creating a second one.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Client-generated key, at most 255 characters. Two submissions with
+            the same key always resolve to one job, including when they race.
+          schema:
+            type: string
+            maxLength: 255
+          example: order-4711
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: Free-form text payload.
+                  example: quarterly report scan
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    Document (`pdf`, `doc`, `docx`, `xlsx`, `pptx`),
+                    image (`jpeg`, `png`, `gif`, `webp`) or
+                    video (`mp4`, `webm`, `quicktime`).
+                    Only one file part is accepted.
+            encoding:
+              file:
+                contentType: >-
+                  application/pdf, application/msword, image/jpeg, image/png,
+                  image/gif, image/webp, video/mp4, video/webm, video/quicktime
+      responses:
+        "202":
+          description: |
+            Job accepted and queued. Also returned for an idempotent replay, in
+            which case the body is the original job.
+          headers:
+            Location:
+              description: Canonical URL of the created job
+              schema:
+                type: string
+              example: /api/v1/jobs/2a2f0f4c-9d1e-4c7a-9a6f-9c2b1f0a7e11
+            Idempotency-Replayed:
+              description: Present and `true` when an existing job was returned.
+              schema:
+                type: string
+                enum: ["true"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+              example:
+                id: 2a2f0f4c-9d1e-4c7a-9a6f-9c2b1f0a7e11
+                status: pending
+                text: quarterly report scan
+                file_name: report.pdf
+                content_type: application/pdf
+                size_bytes: 184320
+                attempts: 0
+                created_at: "2026-01-15T10:04:31.221Z"
+                updated_at: "2026-01-15T10:04:31.221Z"
+        "400":
+          description: Not multipart, or neither text nor file supplied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: bad_request
+                  message: "text or file required"
+                  request_id: "api-7f9c/Kx3pQ-000012"
+        "401":
+          description: Missing or invalid API key (only when API_KEYS is set)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Payload exceeds the limit for its media kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: payload_too_large
+                  message: "payload too large: video limit is 209715200 bytes"
+        "415":
+          description: |
+            Content type is not allowed, or the payload's magic bytes do not
+            match the declared type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: unsupported_media_type
+                  message: "unsupported media type: content does not match declared type video/mp4"
+        "503":
+          description: Upload concurrency limit reached; retry shortly
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              example: 5
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error; correlate with logs using `request_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: Fetch job status and result
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+              example:
+                id: 2a2f0f4c-9d1e-4c7a-9a6f-9c2b1f0a7e11
+                status: completed
+                file_name: report.pdf
+                content_type: application/pdf
+                size_bytes: 184320
+                result_summary: "processed bytes=184320 type=application/pdf"
+                attempts: 1
+                created_at: "2026-01-15T10:04:31.221Z"
+                updated_at: "2026-01-15T10:04:33.902Z"
+                completed_at: "2026-01-15T10:04:33.902Z"
+        "401":
+          description: Missing or invalid API key (only when API_KEYS is set)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: not_found
+                  message: job not found
+
+  /healthz:
+    get:
+      security: []
+      tags: [operations]
+      summary: Liveness probe
+      description: Reports only that the process is running; never touches dependencies.
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /readyz:
+    get:
+      security: []
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        Checks PostgreSQL and object storage, and reports not-ready during
+        graceful shutdown so the load balancer drains the pod first.
+      responses:
+        "200":
+          description: Ready to serve traffic
+        "503":
+          description: A dependency is unavailable, or the pod is draining
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /version:
+    get:
+      security: []
+      tags: [operations]
+      summary: Build metadata
+      responses:
+        "200":
+          description: Version, commit and mode
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: 1.0.0
+                  commit:
+                    type: string
+                    example: 4f2a1c9
+                  mode:
+                    type: string
+                    enum: [api, worker, all]
+
+  /metrics:
+    get:
+      security: []
+      tags: [operations]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Metrics in the Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "`Authorization: Bearer <key>`"
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Job:
+      type: object
+      required: [id, status, size_bytes, attempts, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+          description: |
+            `pending` — queued, or waiting out a retry backoff.
+            `processing` — claimed by a worker holding a lease.
+            `completed` / `failed` — terminal.
+        text:
+          type: string
+        file_name:
+          type: string
+        content_type:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+          description: Bytes actually written to object storage; 0 for text-only jobs.
+        result_summary:
+          type: string
+          description: Result returned by the external processor.
+        error_message:
+          type: string
+          description: Reason for the most recent failure.
+        attempts:
+          type: integer
+          description: Processing attempts consumed so far, bounded by MAX_ATTEMPTS.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - not_found
+                - unsupported_media_type
+                - payload_too_large
+                - too_many_uploads
+                - not_ready
+                - internal_error
+            message:
+              type: string
+              description: |
+                Actionable for client errors. For `internal_error` it is
+                deliberately opaque — use `request_id` to find the detail in
+                the logs.
+            request_id:
+              type: string
